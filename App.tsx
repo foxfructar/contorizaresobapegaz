@@ -3,13 +3,14 @@ import { CylinderSession, HeatLevel } from './types';
 import * as storageService from './services/storageService';
 import ActiveSessionCard from './components/ActiveSessionCard';
 import HistorySessionCard from './components/HistorySessionCard';
-import { PlusCircle, Flame, Ghost, History, Database } from 'lucide-react';
+import { PlusCircle, Flame, Ghost, History, Database, Loader2 } from 'lucide-react';
 
 const App: React.FC = () => {
   const [sessions, setSessions] = useState<CylinderSession[]>([]);
   const [activeSession, setActiveSession] = useState<CylinderSession | undefined>(undefined);
   const [historySessions, setHistorySessions] = useState<CylinderSession[]>([]);
   const [isFirebase, setIsFirebase] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
 
   // Subscribe to real-time updates (Firebase or LocalEvent)
   useEffect(() => {
@@ -18,14 +19,20 @@ const App: React.FC = () => {
 
     const unsubscribe = storageService.subscribeToSessions((data) => {
       setSessions(data);
-      setActiveSession(data.find(s => s.isActive));
-      setHistorySessions(data.filter(s => !s.isActive));
+      // Sortăm local pentru siguranță: cele active primele, apoi după dată
+      const active = data.find(s => s.isActive);
+      const history = data.filter(s => !s.isActive).sort((a, b) => b.startDate - a.startDate);
+      
+      setActiveSession(active);
+      setHistorySessions(history);
     });
 
     return () => unsubscribe();
   }, []);
 
   const handleNewCylinder = async () => {
+    if (isProcessing) return;
+
     // Only ask for confirmation if there is an active session running that we are about to close
     if (activeSession) {
       const confirmMsg = "Sigur arunci butelia asta? Ești convins că nu mai are niciun strop? 🤔";
@@ -34,12 +41,18 @@ const App: React.FC = () => {
       }
     }
     
+    setIsProcessing(true);
     try {
       // Async call - UI will update automatically via subscription
       await storageService.startNewCylinder(activeSession?.id);
+      // Notă: "Revenirea la home screen" se face automat deoarece 
+      // variabila `activeSession` se va actualiza prin abonament,
+      // iar componenta va randa ActiveSessionCard în loc de Empty State.
     } catch (e) {
       console.error("Error starting cylinder:", e);
-      alert("A apărut o eroare. Verifică consola.");
+      alert("A apărut o eroare la crearea buteliei. Verifică consola.");
+    } finally {
+      setIsProcessing(false);
     }
   };
 
@@ -70,7 +83,7 @@ const App: React.FC = () => {
             </div>
             <div>
               <h1 className="text-xl font-black text-white tracking-tight flex items-center gap-2">
-                Monitor GPL <span className="text-purple-400 font-normal opacity-50 text-sm">v3.2</span>
+                Monitor GPL <span className="text-purple-400 font-normal opacity-50 text-sm">v3.3</span>
               </h1>
               <div className="flex items-center gap-1">
                  <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest group-hover:text-purple-400 transition-colors">Ediția "Facturi Mici"</p>
@@ -80,7 +93,7 @@ const App: React.FC = () => {
                    </span>
                  ) : (
                    <span className="bg-yellow-500/10 text-yellow-400 text-[9px] px-1.5 py-0.5 rounded border border-yellow-500/20 flex items-center gap-1">
-                     <Database size={8} /> DEMO (Local)
+                     <Database size={8} /> LOCAL (Safe Mode)
                    </span>
                  )}
               </div>
@@ -90,11 +103,12 @@ const App: React.FC = () => {
           {!activeSession && (
               <button 
                 onClick={handleNewCylinder}
-                className="cursor-pointer bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-2 sm:px-5 sm:py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all flex items-center gap-2 shadow-[0_0_20px_rgba(79,70,229,0.4)] transform hover:scale-105 active:scale-95 border border-indigo-400/30"
+                disabled={isProcessing}
+                className={`cursor-pointer bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-2 sm:px-5 sm:py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all flex items-center gap-2 shadow-[0_0_20px_rgba(79,70,229,0.4)] transform hover:scale-105 active:scale-95 border border-indigo-400/30 ${isProcessing ? 'opacity-70 cursor-wait' : ''}`}
               >
-                  <PlusCircle size={18} />
-                  <span className="hidden sm:inline">Instalează Butoiul 🛢️</span>
-                  <span className="sm:hidden">Nouă 🆕</span>
+                  {isProcessing ? <Loader2 size={18} className="animate-spin" /> : <PlusCircle size={18} />}
+                  <span className="hidden sm:inline">{isProcessing ? 'Se instalează...' : 'Instalează Butoiul 🛢️'}</span>
+                  <span className="sm:hidden">{isProcessing ? '...' : 'Nouă 🆕'}</span>
               </button>
           )}
         </div>
@@ -122,9 +136,10 @@ const App: React.FC = () => {
                 </p>
                 <button 
                     onClick={handleNewCylinder}
-                    className="cursor-pointer bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white px-8 py-4 rounded-2xl font-black text-lg shadow-xl hover:shadow-indigo-500/20 hover:translate-y-[-2px] transition-all active:scale-95 flex items-center justify-center gap-2 mx-auto relative z-10"
+                    disabled={isProcessing}
+                    className={`cursor-pointer bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white px-8 py-4 rounded-2xl font-black text-lg shadow-xl hover:shadow-indigo-500/20 hover:translate-y-[-2px] transition-all active:scale-95 flex items-center justify-center gap-2 mx-auto relative z-10 ${isProcessing ? 'opacity-80 scale-95' : ''}`}
                 >
-                   <span>PORNEȘTE CĂLDURA! 🔥</span>
+                   {isProcessing ? <Loader2 className="animate-spin" /> : <span>PORNEȘTE CĂLDURA! 🔥</span>}
                 </button>
             </div>
           )}

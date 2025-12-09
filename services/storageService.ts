@@ -8,8 +8,7 @@ import {
   doc, 
   query, 
   orderBy, 
-  onSnapshot,
-  Timestamp 
+  onSnapshot
 } from 'firebase/firestore';
 import { firebaseConfig } from '../firebaseConfig';
 
@@ -17,25 +16,40 @@ import { firebaseConfig } from '../firebaseConfig';
 let db: any = null;
 let useLocalStorage = true;
 
-// Încercăm să inițializăm Firebase doar dacă userul a completat config-ul
-if (firebaseConfig.apiKey && !firebaseConfig.apiKey.startsWith("AIzaSy...")) {
-  try {
-    const app = initializeApp(firebaseConfig);
-    db = getFirestore(app);
-    useLocalStorage = false;
-    console.log("🔥 Firebase conectat cu succes!");
-  } catch (e) {
-    console.error("Eroare conectare Firebase (folosim LocalStorage):", e);
+const initializeFirebase = () => {
+  // Verificăm dacă există un API Key valid
+  if (firebaseConfig.apiKey && 
+      !firebaseConfig.apiKey.startsWith("AIzaSy...") && 
+      firebaseConfig.projectId &&
+      !firebaseConfig.projectId.includes("PUNE_AICI")) {
+    
+    try {
+      // Curățăm config-ul de valori placeholder care pot da crash
+      const sanitizedConfig = { ...firebaseConfig };
+      if (sanitizedConfig.messagingSenderId && sanitizedConfig.messagingSenderId.includes("PUNE_AICI")) {
+        delete (sanitizedConfig as any).messagingSenderId;
+      }
+
+      const app = initializeApp(sanitizedConfig);
+      db = getFirestore(app);
+      useLocalStorage = false;
+      console.log("🔥 Firebase inițializat. Încercăm conexiunea...");
+    } catch (e) {
+      console.error("Eroare inițializare Firebase:", e);
+      useLocalStorage = true;
+    }
+  } else {
+    console.warn("⚠️ Configurare Firebase incompletă. Se folosește LocalStorage.");
+    useLocalStorage = true;
   }
-} else {
-  console.warn("⚠️ Firebase nu este configurat. Se folosește LocalStorage (Mod Demo).");
-}
+};
+
+initializeFirebase();
 
 const STORAGE_KEY = 'gpl_monitor_data';
 const COLLECTION_NAME = 'sessions';
 
 // --- HELPERS PENTRU CALCUL STATISTICI ---
-// (Acestea rămân la fel, sunt funcții pure matematice)
 export const calculateStats = (session: CylinderSession): SessionStats => {
   let hoursL1 = 0;
   let hoursL2 = 0;
@@ -66,30 +80,44 @@ export const calculateStats = (session: CylinderSession): SessionStats => {
 
 // --- LOGICA HIBRIDĂ (FIREBASE SAU LOCALSTORAGE) ---
 
-// 1. SUBSCRIBE (Ascultă modificările în timp real)
+// 1. SUBSCRIBE
 export const subscribeToSessions = (callback: (sessions: CylinderSession[]) => void) => {
-  if (!useLocalStorage && db) {
-    // MOD FIREBASE
-    const q = query(collection(db, COLLECTION_NAME), orderBy('startDate', 'desc'));
-    return onSnapshot(q, (snapshot) => {
-      const sessions = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      })) as CylinderSession[];
-      callback(sessions);
-    });
-  } else {
-    // MOD LOCAL STORAGE
-    // Citim imediat
-    const load = () => {
+  // Funcție locală de încărcare
+  const loadLocal = () => {
+    try {
       const data = localStorage.getItem(STORAGE_KEY);
       callback(data ? JSON.parse(data) : []);
-    };
-    load();
-    
-    // Ascultăm evenimentul custom pentru actualizări locale
-    window.addEventListener('storage-update', load);
-    return () => window.removeEventListener('storage-update', load);
+    } catch (e) {
+      console.error("Eroare citire LocalStorage:", e);
+      callback([]);
+    }
+  };
+
+  if (!useLocalStorage && db) {
+    try {
+      const q = query(collection(db, COLLECTION_NAME), orderBy('startDate', 'desc'));
+      return onSnapshot(q, (snapshot) => {
+        const sessions = snapshot.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data()
+        })) as CylinderSession[];
+        callback(sessions);
+      }, (error) => {
+        console.error("Eroare abonare Firebase (trecem pe local):", error);
+        // Fallback automat pe local dacă Firebase eșuează (ex: lipsă permisiuni)
+        useLocalStorage = true;
+        loadLocal();
+      });
+    } catch (e) {
+      console.error("Eroare creare query Firebase:", e);
+      useLocalStorage = true;
+      loadLocal();
+      return () => {};
+    }
+  } else {
+    loadLocal();
+    window.addEventListener('storage-update', loadLocal);
+    return () => window.removeEventListener('storage-update', loadLocal);
   }
 };
 
@@ -97,7 +125,7 @@ export const subscribeToSessions = (callback: (sessions: CylinderSession[]) => v
 export const startNewCylinder = async (currentActiveId?: string) => {
   const now = Date.now();
   
-  // Închidem sesiunea activă (dacă există)
+  // Închidem sesiunea anterioară local (pentru viteză UI) sau remote
   if (currentActiveId) {
     await closeSession(currentActiveId);
   }
@@ -110,15 +138,25 @@ export const startNewCylinder = async (currentActiveId?: string) => {
   };
 
   if (!useLocalStorage && db) {
-    // Firebase
-    await addDoc(collection(db, COLLECTION_NAME), newSessionData);
+    try {
+      await addDoc(collection(db, COLLECTION_NAME), newSessionData);
+      console.log("✅ Butelie creată în Firebase");
+    } catch (e) {
+      console.error("Eroare scriere Firebase (fallback local):", e);
+      // Dacă eșuează scrierea, trecem pe local și scriem acolo
+      useLocalStorage = true;
+      writeLocalNewSession(newSessionData);
+    }
   } else {
-    // LocalStorage
-    const sessions = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
-    const newSession = { id: Math.random().toString(36).substring(2, 9), ...newSessionData };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify([newSession, ...sessions]));
-    window.dispatchEvent(new Event('storage-update'));
+    writeLocalNewSession(newSessionData);
   }
+};
+
+const writeLocalNewSession = (data: any) => {
+  const sessions = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+  const newSession = { id: Math.random().toString(36).substring(2, 9), ...data };
+  localStorage.setItem(STORAGE_KEY, JSON.stringify([newSession, ...sessions]));
+  window.dispatchEvent(new Event('storage-update'));
 };
 
 // 3. SCHIMBARE TREAPTĂ
@@ -127,11 +165,15 @@ export const changeLevel = async (sessionId: string, newLevel: HeatLevel, curren
   const updatedLogs = [...currentLogs, newLog];
 
   if (!useLocalStorage && db) {
-    // Firebase
-    const sessionRef = doc(db, COLLECTION_NAME, sessionId);
-    await updateDoc(sessionRef, { logs: updatedLogs });
+    try {
+      const sessionRef = doc(db, COLLECTION_NAME, sessionId);
+      await updateDoc(sessionRef, { logs: updatedLogs });
+    } catch (e) {
+      console.error("Eroare update Firebase:", e);
+      // Nu facem fallback aici pentru a nu desincroniza grav, dar alertăm
+      alert("Eroare conexiune. Verifică internetul.");
+    }
   } else {
-    // LocalStorage
     const sessions = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
     const updatedSessions = sessions.map((s: CylinderSession) => 
       s.id === sessionId ? { ...s, logs: updatedLogs } : s
@@ -146,19 +188,26 @@ export const closeSession = async (sessionId: string) => {
   const now = Date.now();
   
   if (!useLocalStorage && db) {
-    // Firebase
-    const sessionRef = doc(db, COLLECTION_NAME, sessionId);
-    await updateDoc(sessionRef, { isActive: false, endDate: now });
+    try {
+      const sessionRef = doc(db, COLLECTION_NAME, sessionId);
+      await updateDoc(sessionRef, { isActive: false, endDate: now });
+    } catch (e) {
+      console.error("Eroare închidere sesiune Firebase:", e);
+      // Fallback local
+      closeSessionLocal(sessionId, now);
+    }
   } else {
-    // LocalStorage
-    const sessions = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
-    const updatedSessions = sessions.map((s: CylinderSession) => 
-      s.id === sessionId ? { ...s, isActive: false, endDate: now } : s
-    );
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(updatedSessions));
-    window.dispatchEvent(new Event('storage-update'));
+    closeSessionLocal(sessionId, now);
   }
 };
 
-// Helper pentru a detecta modul curent
+const closeSessionLocal = (sessionId: string, endDate: number) => {
+  const sessions = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+  const updatedSessions = sessions.map((s: CylinderSession) => 
+    s.id === sessionId ? { ...s, isActive: false, endDate: endDate } : s
+  );
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(updatedSessions));
+  window.dispatchEvent(new Event('storage-update'));
+}
+
 export const isUsingFirebase = () => !useLocalStorage;
